@@ -73,7 +73,6 @@ jobs:
           os.makedirs("app/src/main/assets", exist_ok=True)
           os.makedirs("app/src/main/res/values", exist_ok=True)
 
-          # Copier le HTML envoyé par Studio Mobile
           if os.path.exists("src/index.html"):
               shutil.copyfile("src/index.html", "app/src/main/assets/index.html")
           else:
@@ -105,7 +104,7 @@ jobs:
           with open("build.gradle", "w") as f:
               f.write("""plugins {
               id 'com.android.application' version '8.7.3' apply false
-              id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+              id 'org.jetbrains.kotlin.android' version '2.4.20' apply false
           }
           """)
 
@@ -131,8 +130,10 @@ jobs:
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
               }
-              kotlinOptions {
-                  jvmTarget = '17'
+          }
+          kotlin {
+              compilerOptions {
+                  jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
               }
           }
           dependencies {
@@ -176,7 +177,6 @@ jobs:
                   '    <uses-permission android:minSdkVersion="33" android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />'
               ])
 
-          # Dédoublonner les permissions
           perm_block = "\n".join(dict.fromkeys(perm_lines))
 
           manifest = f"""<?xml version="1.0" encoding="utf-8"?>
