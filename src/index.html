@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Réseau Hors Connexion</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #e5ddd5; display: flex; flex-direction: column; height: 100vh; }
+    header { background: #075e54; color: #fff; padding: 12px 14px; }
+    .sub { font-size: 12px; opacity: 0.9; }
+    #loginBox { padding: 24px; margin: auto; background: #fff; border-radius: 12px; width: 88%; max-width: 360px; }
+    #loginBox input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 8px; }
+    #loginBox button { width: 100%; padding: 10px; background: #075e54; color: #fff; border: none; border-radius: 8px; font-weight: bold; }
+    #chatScreen { display: none; flex-direction: column; height: 100vh; }
+    #messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .msg { max-width: 80%; padding: 8px 12px; border-radius: 10px; background: #fff; font-size: 14px; }
+    .mine { align-self: flex-end; background: #dcf8c6; }
+    .author { font-size: 11px; font-weight: bold; color: #075e54; margin-bottom: 3px; }
+    .meta { font-size: 10px; color: #666; text-align: right; margin-top: 4px; }
+    .msg img { max-width: 100%; border-radius: 6px; margin-top: 4px; display: block; }
+    form { display: flex; gap: 6px; padding: 8px; background: #f0f0f0; align-items: center; }
+    input[type="text"] { flex: 1; padding: 10px 12px; border: 1px solid #ccc; border-radius: 20px; }
+    .btn { background: #075e54; color: #fff; border: none; border-radius: 20px; padding: 10px 14px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="loginBox">
+    <h3>Inscription locale</h3>
+    <input type="text" id="usernameInput" placeholder="Nom ou numéro" />
+    <button onclick="saveUser()">Entrer</button>
+  </div>
+  <div id="chatScreen">
+    <header>
+      <strong id="headerName">Réseau Local</strong>
+      <div class="sub" id="netStatus">Mode Émulateur (ou recherche Mesh...)</div>
+    </header>
+    <div id="messages"></div>
+    <form id="chatForm">
+      <label class="btn" style="background:#128c7e;">📷<input type="file" id="imgInput" accept="image/*" hidden /></label>
+      <input type="text" id="textInput" placeholder="Message..." />
+      <button type="submit" class="btn">Envoyer</button>
+    </form>
+  </div>
+  <script>
+    let currentUser = localStorage.getItem('mesh_user') || '';
+    let packets = JSON.parse(localStorage.getItem('mesh_packets') || '[]');
+    let seenIds = new Set(packets.map(p => p.id));
+    if (currentUser) startApp();
+
+    function saveUser() {
+      const n = document.getElementById('usernameInput').value.trim();
+      if (!n) return;
+      currentUser = n;
+      localStorage.setItem('mesh_user', n);
+      startApp();
+    }
+    function startApp() {
+      document.getElementById('loginBox').style.display = 'none';
+      document.getElementById('chatScreen').style.display = 'flex';
+      document.getElementById('headerName').textContent = currentUser;
+      renderAll();
+      if (window.AndroidMesh) updateStatus(AndroidMesh.getPeersCount());
+    }
+    function renderAll() {
+      const box = document.getElementById('messages');
+      box.innerHTML = '';
+      packets.forEach(p => {
+        const d = document.createElement('div');
+        d.className = 'msg' + (p.sender === currentUser ? ' mine' : '');
+        const esc = s => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+        d.innerHTML = '<div class="author">' + esc(p.sender) + '</div>'
+          + (p.text ? '<div>' + esc(p.text) + '</div>' : '')
+          + (p.image ? '<img src="' + p.image + '" />' : '')
+          + '<div class="meta">' + p.time + ' • ' + (p.relayed ? '✓✓' : '🕒') + '</div>';
+        box.appendChild(d);
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+    function createAndSend(text, img) {
+      const pkt = { id: Date.now() + '_' + Math.random().toString(36).slice(2,6), sender: currentUser, text, image: img, time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}), relayed: false };
+      seenIds.add(pkt.id); packets.push(pkt);
+      localStorage.setItem('mesh_packets', JSON.stringify(packets.slice(-80)));
+      pushPending(); renderAll();
+    }
+    function pushPending() {
+      if (!window.AndroidMesh || AndroidMesh.getPeersCount() === 0) return;
+      packets.forEach(p => { if (!p.relayed) { AndroidMesh.broadcastPacket(JSON.stringify(p)); p.relayed = true; } });
+      localStorage.setItem('mesh_packets', JSON.stringify(packets.slice(-80)));
+      renderAll();
+    }
+    window.onPacketReceived = function(str) {
+      const p = JSON.parse(str);
+      if (seenIds.has(p.id)) return;
+      seenIds.add(p.id); p.relayed = true; packets.push(p);
+      localStorage.setItem('mesh_packets', JSON.stringify(packets.slice(-80)));
+      renderAll();
+      if (window.AndroidMesh && AndroidMesh.getPeersCount() > 1) AndroidMesh.broadcastPacket(str);
+    };
+    window.onPeersChanged = function(c) { updateStatus(c); if (c > 0) pushPending(); };
+    function updateStatus(c) {
+      const net = window.AndroidMesh && AndroidMesh.hasInternet() ? 'Internet OK' : 'Hors ligne';
+      document.getElementById('netStatus').textContent = c + ' appareil(s) proche(s) • ' + net;
+    }
+    document.getElementById('chatForm').addEventListener('submit', e => {
+      e.preventDefault();
+      const inp = document.getElementById('textInput');
+      if (!inp.value.trim()) return;
+      createAndSend(inp.value.trim(), null);
+      inp.value = '';
+    });
+    document.getElementById('imgInput').addEventListener('change', e => {
+      const f = e.target.files[0]; if (!f) return;
+      const r = new FileReader();
+      r.onload = ev => {
+        const img = new Image();
+        img.onload = () => {
+          const c = document.createElement('canvas');
+          const s = Math.min(1, 280 / img.width);
+          c.width = img.width * s; c.height = img.height * s;
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          createAndSend('', c.toDataURL('image/jpeg', 0.45));
+        };
+        img.src = ev.target.result;
+      };
+      r.readAsDataURL(f); e.target.value = '';
+    });
+  </script>
+</body>
+</html>
