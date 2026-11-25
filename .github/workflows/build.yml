@@ -165,16 +165,16 @@ jobs:
               perm_lines.append('    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />')
           if enable_mesh:
               perm_lines.extend([
-                  '    <uses-permission android:maxSdkVersion="32" android:name="android.permission.ACCESS_WIFI_STATE" />',
-                  '    <uses-permission android:maxSdkVersion="32" android:name="android.permission.CHANGE_WIFI_STATE" />',
+                  '    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />',
+                  '    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />',
                   '    <uses-permission android:maxSdkVersion="30" android:name="android.permission.BLUETOOTH" />',
                   '    <uses-permission android:maxSdkVersion="30" android:name="android.permission.BLUETOOTH_ADMIN" />',
-                  '    <uses-permission android:maxSdkVersion="32" android:name="android.permission.ACCESS_COARSE_LOCATION" />',
-                  '    <uses-permission android:minSdkVersion="29" android:maxSdkVersion="32" android:name="android.permission.ACCESS_FINE_LOCATION" />',
-                  '    <uses-permission android:minSdkVersion="31" android:name="android.permission.BLUETOOTH_ADVERTISE" />',
-                  '    <uses-permission android:minSdkVersion="31" android:name="android.permission.BLUETOOTH_CONNECT" />',
-                  '    <uses-permission android:minSdkVersion="31" android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />',
-                  '    <uses-permission android:minSdkVersion="33" android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />'
+                  '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+                  '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />',
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />',
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />',
+                  '    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />'
               ])
 
           perm_block = "\n".join(dict.fromkeys(perm_lines))
@@ -190,6 +190,7 @@ jobs:
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
                       android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -210,15 +211,21 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.graphics.Color
           import android.net.ConnectivityManager
           import android.net.NetworkCapabilities
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.webkit.*
+          import android.widget.FrameLayout
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.content.ContextCompat
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
           import com.google.android.gms.nearby.Nearby
           import com.google.android.gms.nearby.connection.*
           import org.json.JSONObject
@@ -232,7 +239,10 @@ jobs:
               private val myNodeName = "Node_" + UUID.randomUUID().toString().substring(0, 6)
               private val connectedEndpoints = mutableSetOf<String>()
               private val pendingEndpoints = mutableSetOf<String>()
+              private val packetCache = mutableListOf<String>()
               private var filePathCallback: ValueCallback<Array<Uri>>? = null
+              private var lastStatus = "Initialisation..."
+              private val handler = Handler(Looper.getMainLooper())
 
               private val fileChooserLauncher = registerForActivityResult(
                   ActivityResultContracts.StartActivityForResult()
@@ -247,14 +257,32 @@ jobs:
               private val permissionsLauncher = registerForActivityResult(
                   ActivityResultContracts.RequestMultiplePermissions()
               ) { grants ->
-                  if (grants.values.all { it }) startMeshNetwork()
+                  if (grants.values.all { it }) {
+                      startMeshNetwork()
+                  } else {
+                      sendDebug("Autorisations refusées ! Active Position & Appareils proches.")
+                  }
               }
 
               @SuppressLint("SetJavaScriptEnabled")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(Color.parseColor("#075e54"))
                   webView = WebView(this)
-                  setContentView(webView)
+                  root.addView(webView, FrameLayout.LayoutParams(
+                      FrameLayout.LayoutParams.MATCH_PARENT,
+                      FrameLayout.LayoutParams.MATCH_PARENT
+                  ))
+                  setContentView(root)
+
+                  ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+                      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                      v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                      insets
+                  }
+
                   connectionsClient = Nearby.getConnectionsClient(this)
 
                   webView.settings.apply {
@@ -262,7 +290,12 @@ jobs:
                       domStorageEnabled = true
                       allowFileAccess = true
                   }
-                  webView.webViewClient = WebViewClient()
+                  webView.webViewClient = object : WebViewClient() {
+                      override fun onPageFinished(view: WebView?, url: String?) {
+                          super.onPageFinished(view, url)
+                          if (connectedEndpoints.isNotEmpty()) notifyPeers() else sendDebug(lastStatus)
+                      }
+                  }
                   webView.webChromeClient = object : WebChromeClient() {
                       override fun onShowFileChooser(v: WebView?, cb: ValueCallback<Array<Uri>>?, p: FileChooserParams?): Boolean {
                           filePathCallback?.onReceiveValue(null)
@@ -277,12 +310,24 @@ jobs:
                   requestRequiredPermissions()
               }
 
+              private fun sendDebug(msg: String) {
+                  lastStatus = msg
+                  runOnUiThread {
+                      val q = JSONObject.quote(msg)
+                      webView.evaluateJavascript(
+                          "if(window.onMeshLog){window.onMeshLog($q);}else{var el=document.getElementById('netStatus');if(el)el.textContent=$q;}",
+                          null
+                      )
+                  }
+              }
+
               private fun requestRequiredPermissions() {
-                  val needed = mutableListOf<String>()
+                  val needed = mutableListOf(
+                      Manifest.permission.ACCESS_FINE_LOCATION,
+                      Manifest.permission.ACCESS_COARSE_LOCATION
+                  )
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       needed += Manifest.permission.NEARBY_WIFI_DEVICES
-                  } else {
-                      needed += Manifest.permission.ACCESS_FINE_LOCATION
                   }
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                       needed += Manifest.permission.BLUETOOTH_ADVERTISE
@@ -290,19 +335,57 @@ jobs:
                       needed += Manifest.permission.BLUETOOTH_SCAN
                   }
                   val missing = needed.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-                  if (missing.isEmpty()) startMeshNetwork() else permissionsLauncher.launch(missing.toTypedArray())
+                  if (missing.isEmpty()) {
+                      startMeshNetwork()
+                  } else {
+                      sendDebug("Autorise Bluetooth + Position...")
+                      permissionsLauncher.launch(missing.toTypedArray())
+                  }
               }
 
               private fun startMeshNetwork() {
-                  connectionsClient.startAdvertising(myNodeName, SERVICE_ID, connCallback, AdvertisingOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build())
-                  connectionsClient.startDiscovery(SERVICE_ID, discCallback, DiscoveryOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build())
+                  sendDebug("Démarrage Bluetooth/Wi-Fi Direct...")
+                  var advOk = false
+                  var discOk = false
+                  connectionsClient.startAdvertising(
+                      myNodeName, SERVICE_ID, connCallback,
+                      AdvertisingOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build()
+                  ).addOnSuccessListener {
+                      advOk = true
+                      if (discOk) sendDebug("Mesh actif ($myNodeName) • Recherche...")
+                  }.addOnFailureListener { e ->
+                      sendDebug("Erreur Pub (Allume BT/WiFi/GPS): ${e.message}")
+                  }
+
+                  connectionsClient.startDiscovery(
+                      SERVICE_ID, discCallback,
+                      DiscoveryOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build()
+                  ).addOnSuccessListener {
+                      discOk = true
+                      if (advOk) sendDebug("Mesh actif ($myNodeName) • Recherche...")
+                  }.addOnFailureListener { e ->
+                      sendDebug("Erreur Scan (Allume BT/WiFi/GPS): ${e.message}")
+                  }
+              }
+
+              private fun connectToEndpoint(id: String, name: String) {
+                  if (connectedEndpoints.contains(id) || pendingEndpoints.contains(id)) return
+                  pendingEndpoints.add(id)
+                  sendDebug("Détecté $name, connexion...")
+                  connectionsClient.requestConnection(myNodeName, id, connCallback)
+                      .addOnFailureListener {
+                          pendingEndpoints.remove(id)
+                          sendDebug("Nouvel essai ($name)...")
+                      }
               }
 
               private val discCallback = object : EndpointDiscoveryCallback() {
                   override fun onEndpointFound(id: String, info: DiscoveredEndpointInfo) {
-                      if (!connectedEndpoints.contains(id) && !pendingEndpoints.contains(id)) {
-                          pendingEndpoints.add(id)
-                          connectionsClient.requestConnection(myNodeName, id, connCallback).addOnFailureListener { pendingEndpoints.remove(id) }
+                      if (myNodeName < info.endpointName) {
+                          connectToEndpoint(id, info.endpointName)
+                      } else {
+                          sendDebug("Détecté ${info.endpointName}, attente...")
+                          handler.postDelayed({ connectToEndpoint(id, info.endpointName) }, 3500)
                       }
                   }
                   override fun onEndpointLost(id: String) {}
@@ -317,6 +400,11 @@ jobs:
                       if (res.status.isSuccess) {
                           connectedEndpoints.add(id)
                           notifyPeers()
+                          packetCache.forEach { json ->
+                              connectionsClient.sendPayload(id, Payload.fromBytes(json.toByteArray(StandardCharsets.UTF_8)))
+                          }
+                      } else {
+                          sendDebug("Connexion refusée (${res.status.statusCode})")
                       }
                   }
                   override fun onDisconnected(id: String) {
@@ -329,6 +417,10 @@ jobs:
                   override fun onPayloadReceived(id: String, payload: Payload) {
                       if (payload.type == Payload.Type.BYTES) {
                           val json = String(payload.asBytes() ?: return, StandardCharsets.UTF_8)
+                          if (!packetCache.contains(json)) {
+                              packetCache.add(json)
+                              if (packetCache.size > 50) packetCache.removeAt(0)
+                          }
                           val q = JSONObject.quote(json)
                           runOnUiThread { webView.evaluateJavascript("window.onPacketReceived && window.onPacketReceived($q);", null) }
                       }
@@ -343,10 +435,18 @@ jobs:
 
               inner class WebAppBridge {
                   @JavascriptInterface fun broadcastPacket(json: String) {
-                      if (connectedEndpoints.isEmpty()) return
-                      connectionsClient.sendPayload(connectedEndpoints.toList(), Payload.fromBytes(json.toByteArray(StandardCharsets.UTF_8)))
+                      runOnUiThread {
+                          if (!packetCache.contains(json)) {
+                              packetCache.add(json)
+                              if (packetCache.size > 50) packetCache.removeAt(0)
+                          }
+                          if (connectedEndpoints.isNotEmpty()) {
+                              connectionsClient.sendPayload(connectedEndpoints.toList(), Payload.fromBytes(json.toByteArray(StandardCharsets.UTF_8)))
+                          }
+                      }
                   }
                   @JavascriptInterface fun getPeersCount(): Int = connectedEndpoints.size
+                  @JavascriptInterface fun getMeshStatus(): String = lastStatus
                   @JavascriptInterface fun hasInternet(): Boolean {
                       val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                       val net = cm.activeNetwork ?: return false
@@ -356,6 +456,7 @@ jobs:
               }
 
               override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
                   connectionsClient.stopAllEndpoints()
                   connectionsClient.stopAdvertising()
                   connectionsClient.stopDiscovery()
@@ -368,11 +469,15 @@ jobs:
 
           import android.annotation.SuppressLint
           import android.content.Intent
+          import android.graphics.Color
           import android.net.Uri
           import android.os.Bundle
           import android.webkit.*
+          import android.widget.FrameLayout
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
 
           class MainActivity : AppCompatActivity() {
               private lateinit var webView: WebView
@@ -391,8 +496,19 @@ jobs:
               @SuppressLint("SetJavaScriptEnabled")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  val root = FrameLayout(this)
+                  root.setBackgroundColor(Color.parseColor("#1e1f22"))
                   webView = WebView(this)
-                  setContentView(webView)
+                  root.addView(webView, FrameLayout.LayoutParams(
+                      FrameLayout.LayoutParams.MATCH_PARENT,
+                      FrameLayout.LayoutParams.MATCH_PARENT
+                  ))
+                  setContentView(root)
+                  ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+                      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                      v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                      insets
+                  }
                   webView.settings.apply {
                       javaScriptEnabled = true
                       domStorageEnabled = true
